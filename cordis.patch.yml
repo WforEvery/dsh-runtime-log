@@ -1,0 +1,7 @@
+# dsh-runtime-log bundle layer.
+# Add "dsh-runtime-log" to a profile's dsh.profile.bundles list and fully
+# restart DSH. This project never edits a real profile.
+- insert:
+    - id: dsh-runtime-log
+      name: dsh-runtime-log
+      config: {}

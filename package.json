@@ -1,0 +1,46 @@
+{
+  "name": "dsh-runtime-log",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Cordis WARN/ERROR persistence for DSH with bounded queue, rotation and cross-run retention.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "test",
+    "scripts/verify-*.mjs",
+    "scripts/verify-*.ps1",
+    "scripts/fixture-host.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "VERIFICATION.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=24.16.0 <25",
+    "dsh": "0.2.2-rc.1"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:plugin": "node --test test/plugin.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "platforms": [
+        "win32"
+      ]
+    }
+  },
+  "dependencies": {},
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}

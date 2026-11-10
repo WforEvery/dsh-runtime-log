@@ -1,0 +1,6 @@
+.verification/
+node_modules/
+*.tgz
+.release-check/
+releases/
+*.zip
