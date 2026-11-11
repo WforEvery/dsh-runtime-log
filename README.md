@@ -4,7 +4,7 @@
 
 ## 状态
 
-本地首版 0.1.0；已安装到 desktop profile，并在完整重启后通过真实宿主日志验收。尚未发布至 npm 或远程仓库。插件运行时不修改 profile；新增 bundle 后需要完整退出并重新启动 DSH。
+本地首版 0.1.0；已安装到 desktop profile，并在完整重启后通过真实宿主日志验收。源码仓库：[WforEvery/dsh-runtime-log](https://github.com/WforEvery/dsh-runtime-log)。尚未发布至 npm。插件运行时不修改 profile；新增 bundle 后需要完整退出并重新启动 DSH。
 
 0.1.0 的兼容范围如下：
 
@@ -64,6 +64,7 @@ Node 区间声明的是上述两个测试点所在的 Node 24 发行线，并非
 - [cordis.patch.yml](cordis.patch.yml)：bundle patch。
 - [package.json](package.json)：清单、`dsh.bundle` 与测试脚本。
 - [CHANGELOG.md](CHANGELOG.md)：0.1.0 版本变更记录。
+- [LICENSE](LICENSE)：MIT 许可证。
 - [test/plugin.test.mjs](test/plugin.test.mjs)：入口、共享/去重、重载、回执与 retention 集成测试。
 - [test/log-sink.test.mjs](test/log-sink.test.mjs)：sink 的队列、脱敏、轮转与关闭测试。
 - [test/retention.test.mjs](test/retention.test.mjs)：retention 的命名识别、存活判断与错误收敛测试。

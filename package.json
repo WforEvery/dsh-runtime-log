@@ -42,5 +42,10 @@
   ],
   "cpu": [
     "x64"
-  ]
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WforEvery/dsh-runtime-log.git"
+  }
 }
