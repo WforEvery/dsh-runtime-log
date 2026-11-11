@@ -11,22 +11,14 @@
   },
   "files": [
     "src",
-    "test",
-    "scripts/verify-*.mjs",
-    "scripts/verify-*.ps1",
-    "scripts/fixture-host.mjs",
     "cordis.patch.yml",
     "README.md",
-    "VERIFICATION.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=24.16.0 <25",
     "dsh": "0.2.2-rc.1"
-  },
-  "scripts": {
-    "test": "node --test",
-    "test:plugin": "node --test test/plugin.test.mjs"
   },
   "dsh": {
     "bundle": {

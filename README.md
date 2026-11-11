@@ -62,24 +62,9 @@ Node 区间声明的是上述两个测试点所在的 Node 24 发行线，并非
 - [src/log-sink.js](src/log-sink.js)：有界格式化、队列、异步写入与轮转。
 - [src/retention.js](src/retention.js)：跨运行文件识别、分组与清理。
 - [cordis.patch.yml](cordis.patch.yml)：bundle patch。
-- [package.json](package.json)：清单、`dsh.bundle` 与测试脚本。
+- [package.json](package.json)：清单、`dsh.bundle` 与兼容范围。
 - [CHANGELOG.md](CHANGELOG.md)：0.1.0 版本变更记录。
 - [LICENSE](LICENSE)：MIT 许可证。
-- [test/plugin.test.mjs](test/plugin.test.mjs)：入口、共享/去重、重载、回执与 retention 集成测试。
-- [test/log-sink.test.mjs](test/log-sink.test.mjs)：sink 的队列、脱敏、轮转与关闭测试。
-- [test/retention.test.mjs](test/retention.test.mjs)：retention 的命名识别、存活判断与错误收敛测试。
-- [scripts/verify-cordis.mjs](scripts/verify-cordis.mjs)：对真实 Cordis 的 exporter 生命周期、重复 fiber、跨 root 与 20 次重载保留上限验证。
-- [scripts/verify-profile.ps1](scripts/verify-profile.ps1)：隔离 DSH_HOME 的 profile 组合校验，并检查真实 profile 未被改动。
-- [VERIFICATION.md](VERIFICATION.md)：本机最终测试与验收回执。
-
-## 本地测试
-
-需要 Node.js >=24.16.0 <25；不需要安装依赖：
-
-    npm test
-    node --test test/plugin.test.mjs
-
-测试只写系统临时目录并在结束后清理；不要拿生产 profile 的日志路径做测试。
 
 ## 安装
 

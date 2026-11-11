@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- 测试文件、验收脚本及验收报告仅本地保留，从 Git 跟踪和后续安装包中排除。
+- 已发布的 v0.1.0 标签和 Release 附件保持原样。
+
 ## 0.1.0 - 2026-11-11
 
 首个本地发布版本，源码以 ES module 直接运行，无编译步骤和第三方运行时依赖。
@@ -25,7 +30,7 @@
 
 ### 复现发布
 
-通过 npm test 和两套宿主验收后，在 v0.1.0 标签对应的源码目录执行：
+以下为原 v0.1.0 标签的发布复现步骤，该历史标签包含测试资料；在其源码目录执行：
 
     npm pack --ignore-scripts
     git archive --format=zip --prefix=dsh-runtime-log-0.1.0/ --output=dsh-runtime-log-0.1.0-source.zip v0.1.0

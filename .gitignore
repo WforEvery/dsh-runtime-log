@@ -4,3 +4,8 @@ node_modules/
 .release-check/
 releases/
 *.zip
+
+# Local development and verification files
+/test/
+/scripts/
+/VERIFICATION.md
