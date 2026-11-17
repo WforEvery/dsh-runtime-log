@@ -15,6 +15,7 @@ export const DEFAULTS = Object.freeze({
 });
 const REGISTRY_KEY = Symbol.for('dsh.runtime-log.registry');
 const DEDUP_LIMIT = 4096;
+const MAX_CLOSED_RUN_BASES = 4096;
 const FALLBACK_INTERVAL_MS = 30_000;
 let lastFallbackAt = 0;
 
@@ -89,10 +90,11 @@ function registry() {
     const found = globalThis[REGISTRY_KEY];
     if (found?.sinks instanceof Map) {
       if (!(found.closing instanceof Set)) found.closing = new Set();
+      if (!(found.closedRunBases instanceof Set)) found.closedRunBases = new Set();
       return found;
     }
   } catch {}
-  const value = { sinks: new Map(), closing: new Set() };
+  const value = { sinks: new Map(), closing: new Set(), closedRunBases: new Set() };
   try { Object.defineProperty(globalThis, REGISTRY_KEY, { value, configurable: true, writable: true }); } catch {}
   return value;
 }
@@ -116,26 +118,35 @@ function makeExporter(state, rootState) {
 function makeState(directory, config, reg) {
   const filePath = path.join(directory, 'host-' + process.pid + '-' + randomUUID() + '.jsonl');
   const sink = createLogSink({ filePath, ...config, onError: reportFailure });
-  const state = { directory, filePath, sink, refs: 0, roots: new Map(), retention: null };
+  const state = { directory, filePath, sink, refs: 0, roots: new Map(), retention: null, drainTimeoutMs: config.drainTimeoutMs };
+  // Run UUIDs are unique inside this process, so activity is matched by the run
+  // basename instead of by directory string. Two case spellings of a Windows
+  // directory that did not exist at apply time become different registry keys
+  // while still naming one real directory; a string comparison would let a
+  // live aliased run be treated as dead and deleted.
   const activeFilePaths = [
-    ...Array.from(reg.sinks.values()).filter(item => item.directory === directory).map(item => item.filePath),
-    ...Array.from(reg.closing).filter(item => item.directory === directory).map(item => item.filePath),
+    ...Array.from(reg.sinks.values()).map(item => item.filePath),
+    ...Array.from(reg.closing).map(item => item.filePath),
   ];
-  // Reserve the current run's maximum rotations; concurrent live runs are protected.
-  const oldRunBudget = Math.max(0, MAX_TOTAL_FILES - config.maxFiles);
+  const isRunActive = (pid, base) => {
+    if (pid !== process.pid) return false;
+    for (const item of reg.sinks.values()) {
+      if (path.basename(item.filePath) === base) return true;
+    }
+    for (const item of reg.closing) {
+      if (path.basename(item.filePath) === base) return true;
+    }
+    if (reg.closedRunBases.has(base)) return false;
+    // This same PID may belong to a worker isolate whose registry is not visible
+    // here. Only runs this isolate has fully settled may be pruned.
+    return true;
+  };
+  // Target the files that actually exist: reserve one slot only while the
+  // current run has not written its first segment, never all future rotations.
   state.retention = Promise.resolve().then(() => pruneRuns({
     directory, currentFilePath: filePath, activeFilePaths,
-    maxTotalFiles: oldRunBudget, currentProcessPid: process.pid, pruneCurrentProcessRuns: true,
-    isRunActive: (pid, base) => {
-      if (pid !== process.pid) return false;
-      for (const item of reg.sinks.values()) {
-        if (item.directory === directory && path.basename(item.filePath) === base) return true;
-      }
-      for (const item of reg.closing) {
-        if (item.directory === directory && path.basename(item.filePath) === base) return true;
-      }
-      return false;
-    },
+    maxTotalFiles: MAX_TOTAL_FILES, reserveCurrentRun: true,
+    currentProcessPid: process.pid, pruneCurrentProcessRuns: true, isRunActive,
   })).catch(() => null);
   return state;
 }
@@ -150,6 +161,7 @@ function lifecycle(state, phase, stats) {
   state.sink.capture({ type: 'warn', name, args: [parts.join(' ')] });
 }
 async function closeState(reg, state) {
+  const closeDeadline = Date.now() + state.drainTimeoutMs;
   if (reg.sinks.get(state.directory) === state) reg.sinks.delete(state.directory);
   reg.closing.add(state);
   let snapshot;
@@ -161,8 +173,31 @@ async function closeState(reg, state) {
     const finalStats = state.sink.stats();
     definitelySettled = finalStats.timedOut !== true && finalStats.inFlight?.records === 0;
   } catch { reportFailure(); }
+  // Retention may block on a slow or unavailable filesystem. Do not let that
+  // background scan extend the Cordis disposer beyond the sink's close deadline.
+  // Keep the run in `closing` until the scan settles, then record that this
+  // isolate has positively established it as closed and eligible for pruning.
+  if (definitelySettled) {
+    const rememberClosedRun = () => {
+      if (!reg.closing.delete(state)) return;
+      const base = path.basename(state.filePath);
+      reg.closedRunBases.delete(base);
+      reg.closedRunBases.add(base);
+      if (reg.closedRunBases.size > MAX_CLOSED_RUN_BASES) {
+        reg.closedRunBases.delete(reg.closedRunBases.values().next().value);
+      }
+    };
+    const retentionSettled = Promise.resolve(state.retention).then(rememberClosedRun, rememberClosedRun);
+    const remainingMs = Math.max(0, closeDeadline - Date.now());
+    if (remainingMs > 0) {
+      let deadlineTimer;
+      await Promise.race([retentionSettled, new Promise((resolve) => { deadlineTimer = setTimeout(resolve, remainingMs); })]);
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    } else {
+      void retentionSettled;
+    }
+  }
   // A timeout cannot cancel an issued OS call; keep its run protected until process exit.
-  if (definitelySettled) reg.closing.delete(state);
 }
 function acquire(ctx, config) {
   const reg = registry();

@@ -40,14 +40,31 @@ const NativeError = Error
 // V8 switched lazy stack storage to ordinary accessors in Node 24. Earlier
 // versions can run the formatter merely by requesting its descriptor.
 const stackDescriptorIsInert = Number(process.versions.node.split('.')[0]) >= 24
+// A quoted value may contain escaped quotes; an unclosed quote consumes the
+// rest of its line so a partially written secret is never left behind.
+const QUOTED_VALUE = String.raw`"(?:[^"\\\r\n]|\\.)*(?:"|\\(?=[\r\n]|$)|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\.)*(?:'|\\(?=[\r\n]|$)|(?=[\r\n]|$))`
+// Cookie/Set-Cookie carries ';'-separated pairs; quoted values may contain
+// semicolons or escaped quotes.
+const COOKIE_TOKEN = String.raw`[^\s,;"'=]+`
+const COOKIE_VALUE = String.raw`(?:${QUOTED_VALUE}|[^;\r\n]*)`
+const COOKIE_PAIR = String.raw`${COOKIE_TOKEN}[^\S\r\n]*=[^\S\r\n]*${COOKIE_VALUE}|${QUOTED_VALUE}|[^\s,;"'=]+`
+// Compound names such as DB_PASSWORD are suffixes of a longer identifier, so
+// the leading boundary must allow '_' (and '-') while still refusing letters.
+const CREDENTIAL_KEY = 'api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key|credentials?|authorization|secret|password|passwd|pwd|token|auth|cookie'
 const TEXT_RULES = [
-  [/\b(?:Bearer|Basic)\s+[^\s"',;]+/gi, '[REDACTED]'],
-  [/\b(?:sk|pk|rk)-[A-Za-z0-9_-]+/g, '[REDACTED]'],
+  // Authorization may use any scheme (token, Digest, ...); redact its line value.
+  [new RegExp('((?<![A-Za-z0-9])(?:(?:proxy|x)[-_])?authorization)["\']?\\s*[=:]\\s*[^\\r\\n]*', 'gi'), '$1: [REDACTED]'],
+  // All cookie pairs are secrets, not only the first one.
+  [new RegExp('((?<![A-Za-z0-9])(?:(?:set|x)[-_])?cookie)["\']?\\s*[=:]\\s*(?:' + COOKIE_PAIR + ')(?:[^\\S\\r\\n]*;[^\\S\\r\\n]*(?:' + COOKIE_PAIR + '))*', 'gi'), '$1: [REDACTED]'],
+  // The scheme explicitly marks the following token as an auth credential.
+  // Preserve only the known Cordis-style prose messages, not short passwords.
+  [/\b(?!(?:Basic\s+authentication\s+failed|Bearer\s+authentication\s+required)\b)(?:Bearer|Basic)\s+[^\s,;]+/gi, '[REDACTED]'],
+  [/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[REDACTED]'],
   [/\bgh[pousr]_[A-Za-z0-9]+/g, '[REDACTED]'],
   [/\bxox[abprs]-[A-Za-z0-9-]+/g, '[REDACTED]'],
   [/\bAKIA[0-9A-Z]+/g, '[REDACTED]'],
   [/\beyJ[A-Za-z0-9_.-]+/g, '[REDACTED]'],
-  [/(\b(?:api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|secret|password|passwd|pwd|token|authorization|auth|cookie|credentials?)\b["']?\s*[=:]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi, '$1[REDACTED]'],
+  [new RegExp('((?<![A-Za-z0-9])(?:' + CREDENTIAL_KEY + ')["\']?\\s*[=:]\\s*)(?:' + QUOTED_VALUE + '|[^\\s,;]+)', 'gi'), '$1[REDACTED]'],
 ]
 
 function positiveInt(value, fallback, minimum) {
@@ -186,9 +203,11 @@ function buildEntry(record, level, limits, now) {
   const message = formatArgs(extractArgs(record), ctx)
   const stack = ctx.stack ?? (types.isNativeError(record) ? STACK_UNAVAILABLE : redact(ownData(record, 'stack'), ctx))
   const finalCtx = { remaining: MAX_SCAN, truncated: false }
-  const entry = { time: isoNow(now), level, name: clip(redact(name, finalCtx), 120), message: redact(message, finalCtx) }
+  const nameText = redact(name, finalCtx)
+  const nameClipped = nameText.length > 120
+  const entry = { time: isoNow(now), level, name: nameClipped ? clip(nameText, 120) : nameText, message: redact(message, finalCtx) }
   if (stack) entry.stack = redact(stack, finalCtx)
-  if (ctx.truncated || finalCtx.truncated) entry.truncated = true
+  if (ctx.truncated || finalCtx.truncated || nameClipped) entry.truncated = true
   const cap = Math.min(limits.maxEntryBytes, limits.maxFileBytes, limits.maxQueueBytes)
   for (;;) {
     const data = Buffer.from(JSON.stringify(entry) + '\n', 'utf8')

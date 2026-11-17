@@ -1,7 +1,6 @@
 {
   "name": "dsh-runtime-log",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "description": "Local Cordis WARN/ERROR persistence for DSH with bounded queue, rotation and cross-run retention.",
   "type": "module",
   "main": "./src/index.js",

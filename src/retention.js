@@ -6,6 +6,7 @@
  *   currentFilePath,
  *   activeFilePaths = [],
  *   maxTotalFiles = 16,
+ *   reserveCurrentRun = false,
  *   currentProcessPid = process.pid,
  *   pruneCurrentProcessRuns = false,
  *   fs?,
@@ -31,6 +32,14 @@
  * process are never removed. Pruning stops as soon as the cap is met or no
  * dead groups remain, so live/unknown/protected runs can legitimately leave
  * the directory above the cap.
+ *
+ * maxTotalFiles is a target based on files that actually exist, not a hard
+ * quota. With reserveCurrentRun = true the caller declares that the current
+ * run may not have written its first segment yet (the sink creates it lazily),
+ * so exactly one slot is reserved - and only when the current run's file is not
+ * part of this scan. Once the current segment is on disk it is counted like any
+ * other retained file; future rotations are never reserved up front. Live
+ * runs and later rotations may legitimately exceed the target.
  *
  * process.pid is the current process, so its own older run groups are not
  * "definitely dead": by default (pruneCurrentProcessRuns = false) any group
@@ -123,18 +132,15 @@ function currentGroupBase(currentFilePath) {
 // Run-group bases that must never be pruned: the current file plus every
 // caller-declared active file. Rotations resolve to their base, so declaring
 // any segment protects the whole group. Malformed entries are ignored.
-function protectedGroupBases(settings) {
+function protectedGroupBases(settings, currentBase) {
   const bases = new Set()
-  const add = (value) => {
-    const base = currentGroupBase(value)
-    if (base !== null) bases.add(base)
-  }
-  add(settings.currentFilePath)
+  if (currentBase !== null) bases.add(currentBase)
   const activeFilePaths = settings.activeFilePaths
   if (Array.isArray(activeFilePaths)) {
     for (const value of activeFilePaths) {
       try {
-        add(value)
+        const base = currentGroupBase(value)
+        if (base !== null) bases.add(base)
       } catch {
         // An exotic value (throwing toString/getter) is simply not protected.
       }
@@ -213,7 +219,9 @@ export async function pruneRuns(options = {}) {
     const fsp = resolveFs(settings.fs)
     const isAlive = typeof settings.isAlive === 'function' ? settings.isAlive : defaultIsAlive
     const maxTotalFiles = resolveMaxTotalFiles(settings.maxTotalFiles)
-    const protectedBases = protectedGroupBases(settings)
+    const currentBase = currentGroupBase(settings.currentFilePath)
+    const protectedBases = protectedGroupBases(settings, currentBase)
+    const reserveCurrentRun = settings.reserveCurrentRun === true
     const currentProcessPid = resolveCurrentProcessPid(settings.currentProcessPid)
     const pruneCurrentProcessRuns = resolvePruneCurrentProcessRuns(settings.pruneCurrentProcessRuns)
 
@@ -251,7 +259,14 @@ export async function pruneRuns(options = {}) {
     }
 
     retainedFiles = files.length
-    if (retainedFiles <= maxTotalFiles) return finalize()
+    // Budget from the files that exist. The cap only gives up a slot when the
+    // current run's first segment is not on disk yet; it never reserves every
+    // future rotation of the current run.
+    let budget = maxTotalFiles
+    if (reserveCurrentRun && !(currentBase !== null && files.some((file) => file.base === currentBase))) {
+      budget = Math.max(0, budget - 1)
+    }
+    if (retainedFiles <= budget) return finalize()
 
     const groups = new Map()
     for (const file of files) {
@@ -283,7 +298,7 @@ export async function pruneRuns(options = {}) {
     }
 
     for (const group of ordered) {
-      if (retainedFiles <= maxTotalFiles) break
+      if (retainedFiles <= budget) break
       // The directory listing is asynchronous. Re-check the caller's live registry
       // after that await so new same-PID runs are not mistaken for closed runs.
       if (protectedBases.has(group.base) || isCurrentlyActive(group)) continue
