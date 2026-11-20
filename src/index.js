@@ -12,6 +12,7 @@ export const DEFAULTS = Object.freeze({
   directory: '', maxFileBytes: 5 * 1024 * 1024, maxFiles: 4,
   maxQueueRecords: 2000, maxQueueBytes: 1024 * 1024,
   maxEntryBytes: 16 * 1024, flushIntervalMs: 200, drainTimeoutMs: 1000,
+  pinOnFirstError: true,
 });
 // Shared across plugin copies so one process owns one sink per directory.
 // This is a deduplication registry, not a security boundary: Symbol.for is
@@ -98,6 +99,7 @@ function normalize(raw) {
     maxEntryBytes: bounded(field('maxEntryBytes'), Math.min(DEFAULTS.maxEntryBytes, queueBytes), 256, Math.min(256 * 1024, queueBytes)),
     flushIntervalMs: bounded(field('flushIntervalMs'), DEFAULTS.flushIntervalMs, 25, 60_000),
     drainTimeoutMs: bounded(field('drainTimeoutMs'), DEFAULTS.drainTimeoutMs, 25, 10_000),
+    pinOnFirstError: field('pinOnFirstError') !== false,
   };
 }
 function canonicalize(directory) {

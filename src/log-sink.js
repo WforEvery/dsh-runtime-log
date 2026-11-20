@@ -17,6 +17,10 @@
  * not complete scrubbing of arbitrary secrets.
  *
  * filePath is a unique run namespace, exclusively created and never resumed.
+ * With pinOnFirstError the first ERROR record seals everything written so far
+ * into a sibling <run>-incident.jsonl (one rename per sink, at most once) so
+ * later rotations can never page the crash context out; the incident file
+ * shares the run's retention group and is only removed with the whole run.
  * A write/rotation failure disables this sink: a partial append may leave a
  * torn final line, but no later JSONL will be appended to it. Retention of other
  * runs belongs to the caller. fs/timers/now remain injectable for fault tests.
@@ -35,6 +39,7 @@ const DEFAULTS = Object.freeze({
   flushIntervalMs: 200,
   maxEntryBytes: 16 * 1024,
   closeTimeoutMs: 2000,
+  pinOnFirstError: true,
 })
 const DEFAULT_LEVELS = ['error', 'warn', 'info', 'debug']
 const MAX_ARGS = 20
@@ -111,6 +116,7 @@ function createLimits(opts) {
     flushIntervalMs: positiveInt(opts.flushIntervalMs, DEFAULTS.flushIntervalMs, 0),
     maxEntryBytes: positiveInt(opts.maxEntryBytes, DEFAULTS.maxEntryBytes, 128),
     closeTimeoutMs: positiveInt(opts.closeTimeoutMs, positiveInt(opts.drainTimeoutMs, DEFAULTS.closeTimeoutMs, 1), 1),
+    pinOnFirstError: opts.pinOnFirstError !== false,
   }
 }
 function ownData(value, key) {
@@ -266,7 +272,7 @@ export function createLogSink(options = {}) {
   const filePath = typeof opts.filePath === 'string' ? nodePath.resolve(opts.filePath)
     : nodePath.join(typeof opts.dir === 'string' ? nodePath.resolve(opts.dir) : nodePath.join(nodeOs.tmpdir(), 'dsh-runtime-log'),
       typeof opts.fileName === 'string' ? nodePath.basename(opts.fileName) : 'runtime-' + process.pid + '-' + randomUUID() + '.jsonl')
-  const state = { accepted: 0, ignored: 0, dropped: 0, written: 0, errors: 0, rotations: 0, bytesWritten: 0, lost: 0, lastError: null }
+  const state = { accepted: 0, ignored: 0, dropped: 0, written: 0, errors: 0, rotations: 0, incidents: 0, bytesWritten: 0, lost: 0, lastError: null }
   let queue = []
   let queuedBytes = 0
   let inFlight = null
@@ -280,6 +286,8 @@ export function createLogSink(options = {}) {
   let writerPromise = null
   let closePromise = null
   let timer = null
+  let incidentPath = null
+  let pinSettled = false
   const done = Promise.resolve()
   const stopped = () => disabled || timedOut || closed
 
@@ -347,6 +355,39 @@ export function createLogSink(options = {}) {
     currentSize = 0
     state.rotations++
   }
+  // Seals everything written so far into <run>-incident.jsonl and starts a
+  // fresh segment, so the pre-crash context is never touched by rotation.
+  // Best-effort: if the rename fails we keep appending to the old segment.
+  async function sealSegment() {
+    const candidate = filePath.slice(0, filePath.length - '.jsonl'.length) + '-incident.jsonl'
+    await releaseHandle()
+    if (stopped()) return
+    try {
+      await fsp.rename(filePath, candidate)
+    } catch {
+      if (stopped()) return
+      handle = await fsp.open(filePath, 'a', 0o600)
+      return
+    }
+    if (stopped()) return
+    handle = await fsp.open(filePath, 'wx', 0o600)
+    currentSize = 0
+    incidentPath = candidate
+    state.incidents++
+  }
+  // Fallback for a first error that lands right after a rotation: the fresh
+  // segment is empty, and the crash context is the just-rotated .1 segment.
+  async function sealPreviousSegment() {
+    const previous = filePath + '.1'
+    const candidate = filePath.slice(0, filePath.length - '.jsonl'.length) + '-incident.jsonl'
+    try {
+      await fsp.rename(previous, candidate)
+    } catch {
+      return
+    }
+    incidentPath = candidate
+    state.incidents++
+  }
   async function drain() {
     try {
       if (stopped()) return
@@ -354,39 +395,58 @@ export function createLogSink(options = {}) {
       await initialize()
       while (queue.length && !stopped()) {
         // Keep the pending record evictable throughout initialization/rotation.
-        if (currentSize + queue[0].length > limits.maxFileBytes) {
+        if (currentSize + queue[0].data.length > limits.maxFileBytes) {
           await rotate()
           continue
         }
         // One appendFile per drain cycle instead of one per record: every
         // queued record that fits into the current segment shares a single
-        // write through the writeFile machinery. The batch is bounded by the
-        // queue byte cap, and inFlight keeps it counted against capacity
-        // while the append is outstanding.
+        // write through the writeFile machinery. A pending pin stops the batch
+        // right before the first error record so the pre-error segment can be
+        // sealed intact. The batch is bounded by the queue byte cap, and
+        // inFlight keeps it counted against capacity while it is outstanding.
         const batch = []
         let batchBytes = 0
-        while (queue.length) {
-          const next = queue[0]
-          if (currentSize + batchBytes + next.length > limits.maxFileBytes) break
-          queue.shift()
-          queuedBytes -= next.length
-          batch.push(next)
-          batchBytes += next.length
+        let pinBoundary = false
+        for (const item of queue) {
+          if (currentSize + batchBytes + item.data.length > limits.maxFileBytes) break
+          if (limits.pinOnFirstError && !pinSettled && item.error) {
+            pinBoundary = true
+            break
+          }
+          batch.push(item)
+          batchBytes += item.data.length
         }
-        inFlight = {
-          records: batch.length,
-          bytes: batchBytes,
-          data: batchBytes === batch[0].length ? batch[0] : Buffer.concat(batch, batchBytes),
+        queue.splice(0, batch.length)
+        queuedBytes -= batchBytes
+        if (batchBytes > 0) {
+          inFlight = {
+            records: batch.length,
+            bytes: batchBytes,
+            data: batchBytes === batch[0].data.length
+              ? batch[0].data
+              : Buffer.concat(batch.map(item => item.data), batchBytes),
+          }
+          try {
+            await fsp.appendFile(handle, inFlight.data)
+            currentSize += batchBytes
+            state.written += batch.length
+            state.bytesWritten += batchBytes
+          } catch (error) {
+            state.lost += batch.length
+            throw error
+          } finally { inFlight = null }
         }
-        try {
-          await fsp.appendFile(handle, inFlight.data)
-          currentSize += batchBytes
-          state.written += batch.length
-          state.bytesWritten += batchBytes
-        } catch (error) {
-          state.lost += batch.length
-          throw error
-        } finally { inFlight = null }
+        if (pinBoundary) {
+          // The first ERROR record is now next in the queue. Everything before
+          // it is on disk; seal that segment once so rotation cannot drop the
+          // crash context later. If the segment was just rotated empty, the
+          // context sits in .1 and that segment is sealed instead.
+          if (currentSize > 0) await sealSegment()
+          else await sealPreviousSegment()
+          pinSettled = true
+          continue
+        }
       }
     } catch { disable() }
     finally {
@@ -420,14 +480,14 @@ export function createLogSink(options = {}) {
       const flightBytes = inFlight?.bytes ?? 0
       const flightCount = inFlight?.records ?? 0
       while (queue.length && (queue.length + flightCount + 1 > limits.maxQueueRecords || queuedBytes + flightBytes + data.length > limits.maxQueueBytes)) {
-        queuedBytes -= queue.shift().length
+        queuedBytes -= queue.shift().data.length
         state.dropped++
       }
       if (queue.length + flightCount + 1 > limits.maxQueueRecords || queuedBytes + flightBytes + data.length > limits.maxQueueBytes) {
         state.dropped++
         return false
       }
-      queue.push(data)
+      queue.push({ data, error: level === 'error' })
       queuedBytes += data.length
       state.accepted++
       return true
@@ -476,6 +536,7 @@ export function createLogSink(options = {}) {
       inFlight: flight,
       buffered: { records: queue.length + flight.records, bytes: queuedBytes + flight.bytes },
       limits: { ...limits },
+      pinned: incidentPath !== null,
       accepting: accepting && !stopped(), closed, disabled, timedOut,
     }
   }

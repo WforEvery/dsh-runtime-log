@@ -15,11 +15,11 @@
  * returns { deletedFiles, retainedFiles, errors } and never rejects.
  *
  * A run file is recognized only when its basename is exactly
- * host-<positive decimal pid>-<valid UUID>.jsonl with an optional .1 ... .31
- * rotation suffix. Recognized files are grouped by their run basename (the
- * rotation suffixes belong to the same run), and only regular files are
- * considered: symbolic links, junctions, directories and unrelated names are
- * ignored and never followed.
+ * host-<positive decimal pid>-<valid UUID>[-incident].jsonl with an optional
+ * .1 ... .31 rotation suffix. Recognized files are grouped by their run
+ * basename (rotation suffixes and the optional -incident pin belong to the
+ * same run), and only regular files are considered: symbolic links,
+ * junctions, directories and unrelated names are ignored and never followed.
  *
  * Every protected run group is always retained: the current run, identified
  * by currentFilePath (including any rotation), and each group named by an
@@ -71,10 +71,12 @@ import nodePath from 'node:path'
 
 const DEFAULT_MAX_TOTAL_FILES = 16
 
-// host-<pid>-<uuid>.jsonl[.1..31]
+// host-<pid>-<uuid>[-incident].jsonl[.1..31]
 // PID: positive decimal without a leading zero.
 // UUID: canonical 8-4-4-4-12, RFC 4122 version 1-8 and variant 8/9/a/b.
-const RUN_FILE_RE = /^host-([1-9]\d*)-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})\.jsonl(?:\.([1-9]|[12]\d|3[01]))?$/
+// An -incident file is the pinned first-error segment of the same run and is
+// grouped with its regular segments for protection and cleanup.
+const RUN_FILE_RE = /^host-([1-9]\d*)-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})(-incident)?\.jsonl(?:\.([1-9]|[12]\d|3[01]))?$/
 
 function defaultIsAlive(pid) {
   try {
@@ -112,7 +114,7 @@ function parseRunFile(name) {
   const runId = match[2].toLowerCase()
   return {
     pid,
-    rotation: match[3] === undefined ? 0 : Number(match[3]),
+    rotation: match[4] === undefined ? 0 : Number(match[4]),
     base: 'host-' + pid + '-' + runId + '.jsonl',
   }
 }

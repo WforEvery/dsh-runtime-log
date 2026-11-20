@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 新增 `pinOnFirstError`（默认开启）：首条 ERROR 到达时把已写内容封存为 `host-<pid>-<uuid>-incident.jsonl`，崩溃前的上下文不再被后续轮转覆盖；incident 文件计入 16 文件保留目标并随运行组回收，每运行最多封存一次。
 ## 0.1.2 - 2026-11-20
 
 - 写入性能：drain 每周期将待写队列拼为单次批量写，替代逐条顺序 appendFile；在途记账改为条数与字节，行为与故障路径不变。
