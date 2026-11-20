@@ -4,7 +4,7 @@
 
 [GitHub Release](https://github.com/WforEvery/dsh-runtime-log/releases) · [npm](https://www.npmjs.com/package/dsh-runtime-log) · [变更记录](CHANGELOG.md) · [问题反馈](https://github.com/WforEvery/dsh-runtime-log/issues) · [MIT 许可证](LICENSE)
 
-> 当前修复版本为 **0.1.2**。这是第三方 DSH 插件，不是 DeepSeek 官方产品。它只在下列支持环境中发布和验证；部署前请阅读隐私及限制说明。
+> 当前修复版本为 **0.1.2**，已发布至 [npm](https://www.npmjs.com/package/dsh-runtime-log)。这是第三方 DSH 插件，不是 DeepSeek 官方产品。它只在下列支持环境中发布和验证；部署前请阅读隐私及限制说明。
 
 ## 功能
 
