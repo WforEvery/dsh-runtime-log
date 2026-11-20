@@ -37,6 +37,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/WforEvery/dsh-runtime-log.git"
+    "url": "git+https://github.com/WforEvery/dsh-runtime-log.git"
   }
 }
