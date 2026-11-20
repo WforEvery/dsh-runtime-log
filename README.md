@@ -123,7 +123,8 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
 ## 隐私与限制
 
 - **覆盖范围有限。** 仅保存插件加载后经过 Cordis logger 的 WARN / ERROR；不会收集全部 `console`、stdout / stderr、工具结果或会话历史，也不追补加载前的记录。
-- **脱敏并非秘密清除保证。** 插件会处理已知凭据格式，但任意自由文本、未知编码、截断边界或尚未识别的格式仍可能含秘密。显式 `Authorization` / `Proxy-Authorization` 字段从 scheme 到该行末尾整体遮盖，同一行后续的无关诊断文本也可能被隐藏；Cookie 与 Set-Cookie 字段整体遮盖。为减少英文诊断误报，scheme 规则保留 `Basic authentication failed` 和 `Bearer authentication required` 两类已识别文案。插件不会主动读取会话或凭据，其他组件传给 logger 的文本仍可能包含敏感信息。
+- **脱敏并非秘密清除保证。** 插件会处理已知凭据格式，但任意自由文本、未知编码、截断边界或尚未识别的格式仍可能含秘密。显式 `Authorization` / `Proxy-Authorization` 字段从 scheme 到该行末尾整体遮盖，同一行后续的无关诊断文本也可能被隐藏；Cookie 与 Set-Cookie 字段整体遮盖。为减少英文诊断误报，scheme 规则保留 `Basic authentication failed` 和 `Bearer authentication required` 两类已识别文案。URL userinfo（`scheme://user:pass@host`）中的 `user:pass@` 整段遮盖，仅识别冒号形式，`host:port` 不受影响。凭据关键词（password / token / secret 等）后直接跟随的引号值会遮盖；后跟空格裸值时也遮盖，但为保持诊断可读，裸值若以常见英文停用词开头（如 `password is required`、`token was invalid`）则跳过——代价是以停用词开头或无凭据关键词的值仍可能漏过。插件不会主动读取会话或凭据，其他组件传给 logger 的文本仍可能包含敏感信息。
+- **Windows 文件权限继承目录 ACL。** 插件创建文件使用的 `0o600` 模式位在 Windows 上不生效，日志文件的实际权限完全继承目录 ACL。请勿将 `directory` 配置到 `%PUBLIC%` 等公共或共享位置；插件在创建写入器时检测到目录位于 `%PUBLIC%` 之下会向 stderr 输出限频告警。建议日志目录仅当前用户可读。
 - **日志可能丢失。** 队列满时会丢弃记录，超长内容会截断；强制结束、断电、关闭超时或 I/O 错误都可能使末尾记录缺失。异步写入不提供崩溃持久性保证。
 - **写入错误会停用对应写入器。** 文件创建、写入或轮转失败后不会无限重试，会尝试向 stderr 输出限频提示。需修复目录或磁盘问题后重载插件或重启宿主。
 - **日志按敏感诊断材料保管。** 文件为本地文本，插件不加密。分享前应人工检查并删除令牌、Cookie、个人信息及其它敏感内容；使用合适的目录权限。

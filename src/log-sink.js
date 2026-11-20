@@ -1,7 +1,8 @@
 /**
  * Bounded, best-effort JSONL sink; not crash-safe storage.
- * capture is synchronous; flush shares one never-rejecting writer promise;
- * close stops intake and drains to one deadline. An issued OS call cannot be
+ * capture is synchronous; flush shares one never-rejecting writer promise and
+ * appends the pending queue as one batched write per drain cycle; close stops
+ * intake and drains to one deadline. An issued OS call cannot be
  * cancelled. After timeout only late settlement and handle cleanup are allowed.
  *
  * Only primitive arguments and native Error own string data fields are logged.
@@ -9,8 +10,11 @@
  * Lazy/accessor or unsafe Error stacks become [Stack unavailable]. In V8 older
  * than Node 24 even inspecting a lazy stack descriptor may execute code;
  * native Error stacks on those versions conservatively use the marker.
- * Recognized secrets are redacted before clipping, with bounded text scanning.
- * This is best-effort filtering, not complete scrubbing of arbitrary secrets.
+ * Recognized secrets are redacted before clipping, with bounded text scanning:
+ * key=value and key:value forms, quoted or bare values directly after a
+ * credential keyword (skipping common English prose via a stopword guard),
+ * and URL userinfo (scheme://user:pass@host). This is best-effort filtering,
+ * not complete scrubbing of arbitrary secrets.
  *
  * filePath is a unique run namespace, exclusively created and never resumed.
  * A write/rotation failure disables this sink: a partial append may leave a
@@ -51,6 +55,24 @@ const COOKIE_PAIR = String.raw`${COOKIE_TOKEN}[^\S\r\n]*=[^\S\r\n]*${COOKIE_VALU
 // Compound names such as DB_PASSWORD are suffixes of a longer identifier, so
 // the leading boundary must allow '_' (and '-') while still refusing letters.
 const CREDENTIAL_KEY = 'api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key|credentials?|authorization|secret|password|passwd|pwd|token|auth|cookie'
+// A bare value directly after a credential keyword is redacted unless it is
+// one of these common English prose words, so diagnostic sentences such as
+// "token was invalid" or "password is required" stay readable.
+const BARE_VALUE_STOPWORDS = [
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'has', 'have', 'had', 'do', 'does', 'did', 'done',
+  'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
+  'not', 'no', 'none', 'null', 'undefined', 'empty', 'missing',
+  'invalid', 'incorrect', 'wrong', 'mismatch', 'expired',
+  'required', 'failed', 'failure', 'denied', 'rejected', 'revoked',
+  'disabled', 'enabled', 'error', 'errors', 'warning', 'warn',
+  'for', 'from', 'with', 'without', 'to', 'into', 'onto', 'of', 'in', 'on', 'at', 'by',
+  'the', 'a', 'an', 'and', 'or', 'if', 'when', 'while', 'then', 'than',
+  'that', 'this', 'these', 'those', 'it', 'its',
+  'use', 'used', 'using', 'please', 'provide', 'enter', 'set', 'get',
+  'check', 'verify', 'expected', 'found', 'type', 'value', 'values',
+  'field', 'fields', 'key', 'keys', 'name', 'names',
+]
 const TEXT_RULES = [
   // Authorization may use any scheme (token, Digest, ...); redact its line value.
   [new RegExp('((?<![A-Za-z0-9])(?:(?:proxy|x)[-_])?authorization)["\']?\\s*[=:]\\s*[^\\r\\n]*', 'gi'), '$1: [REDACTED]'],
@@ -65,6 +87,15 @@ const TEXT_RULES = [
   [/\bAKIA[0-9A-Z]+/g, '[REDACTED]'],
   [/\beyJ[A-Za-z0-9_.-]+/g, '[REDACTED]'],
   [new RegExp('((?<![A-Za-z0-9])(?:' + CREDENTIAL_KEY + ')["\']?\\s*[=:]\\s*)(?:' + QUOTED_VALUE + '|[^\\s,;]+)', 'gi'), '$1[REDACTED]'],
+  // URL userinfo (scheme://user:pass@host) is a credential in any position;
+  // only the colon form matches, so plain host:port URLs are untouched.
+  [new RegExp('((?:[a-z][a-z0-9+.-]*):\\/\\/)[^\\s\\/@:]*:[^\\s\\/@]*@', 'gi'), '$1[REDACTED]@'],
+  // A value quoted directly after a credential keyword needs no = or : at all.
+  [new RegExp('((?<![A-Za-z0-9])(?:' + CREDENTIAL_KEY + ')["\']?\\s+)(' + QUOTED_VALUE + ')', 'gi'), '$1[REDACTED]'],
+  // A bare value directly after a credential keyword, guarded against prose:
+  // the value must start with a word character and not be a stop word, so
+  // "password hunter2" is redacted while "password is required" stays intact.
+  [new RegExp('((?<![A-Za-z0-9])(?:' + CREDENTIAL_KEY + ')["\']?)(\\s+)(?!(?:' + BARE_VALUE_STOPWORDS.join('|') + ')(?![A-Za-z0-9]))[A-Za-z0-9_$][^\\s,;]*', 'gi'), '$1$2[REDACTED]'],
 ]
 
 function positiveInt(value, fallback, minimum) {
@@ -327,16 +358,33 @@ export function createLogSink(options = {}) {
           await rotate()
           continue
         }
-        inFlight = queue.shift()
-        queuedBytes -= inFlight.length
-        const bytes = inFlight.length
+        // One appendFile per drain cycle instead of one per record: every
+        // queued record that fits into the current segment shares a single
+        // write through the writeFile machinery. The batch is bounded by the
+        // queue byte cap, and inFlight keeps it counted against capacity
+        // while the append is outstanding.
+        const batch = []
+        let batchBytes = 0
+        while (queue.length) {
+          const next = queue[0]
+          if (currentSize + batchBytes + next.length > limits.maxFileBytes) break
+          queue.shift()
+          queuedBytes -= next.length
+          batch.push(next)
+          batchBytes += next.length
+        }
+        inFlight = {
+          records: batch.length,
+          bytes: batchBytes,
+          data: batchBytes === batch[0].length ? batch[0] : Buffer.concat(batch, batchBytes),
+        }
         try {
-          await fsp.appendFile(handle, inFlight)
-          currentSize += bytes
-          state.written++
-          state.bytesWritten += bytes
+          await fsp.appendFile(handle, inFlight.data)
+          currentSize += batchBytes
+          state.written += batch.length
+          state.bytesWritten += batchBytes
         } catch (error) {
-          state.lost++
+          state.lost += batch.length
           throw error
         } finally { inFlight = null }
       }
@@ -369,8 +417,8 @@ export function createLogSink(options = {}) {
       if (level === null) { state.ignored++; return false }
       const data = buildEntry(record, level, limits, now)
       if (data === null) { state.dropped++; return false }
-      const flightBytes = inFlight?.length ?? 0
-      const flightCount = inFlight ? 1 : 0
+      const flightBytes = inFlight?.bytes ?? 0
+      const flightCount = inFlight?.records ?? 0
       while (queue.length && (queue.length + flightCount + 1 > limits.maxQueueRecords || queuedBytes + flightBytes + data.length > limits.maxQueueBytes)) {
         queuedBytes -= queue.shift().length
         state.dropped++
@@ -421,7 +469,7 @@ export function createLogSink(options = {}) {
     return closePromise
   }
   function stats() {
-    const flight = { records: inFlight ? 1 : 0, bytes: inFlight?.length ?? 0 }
+    const flight = { records: inFlight?.records ?? 0, bytes: inFlight?.bytes ?? 0 }
     return {
       ...state,
       queued: { records: queue.length, bytes: queuedBytes },

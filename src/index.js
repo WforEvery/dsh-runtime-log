@@ -13,9 +13,19 @@ export const DEFAULTS = Object.freeze({
   maxQueueRecords: 2000, maxQueueBytes: 1024 * 1024,
   maxEntryBytes: 16 * 1024, flushIntervalMs: 200, drainTimeoutMs: 1000,
 });
+// Shared across plugin copies so one process owns one sink per directory.
+// This is a deduplication registry, not a security boundary: Symbol.for is
+// reachable by any same-process code, which could equally delete log files
+// directly. Every consumer already fails safe against a tampered registry
+// (shape-checked in registry(), conservative retention on unexpected shapes).
 const REGISTRY_KEY = Symbol.for('dsh.runtime-log.registry');
 const DEDUP_LIMIT = 4096;
 const MAX_CLOSED_RUN_BASES = 4096;
+// Defensive cap against unbounded growth across repeated drain timeouts.
+// Eviction is safe in the conservative direction: a timed-out run removed
+// from `closing` is never added to closedRunBases, so isRunActive falls back
+// to its "active" answer and the run stays protected from pruning.
+const MAX_CLOSING_STATES = 4096;
 const FALLBACK_INTERVAL_MS = 30_000;
 let lastFallbackAt = 0;
 
@@ -24,6 +34,26 @@ function reportFailure() {
   if (now - lastFallbackAt < FALLBACK_INTERVAL_MS) return;
   lastFallbackAt = now;
   try { process.stderr.write('[dsh-runtime-log] local log write failed; check the configured log directory.\n'); } catch {}
+}
+// On Windows the 0o600 creation mode has no effect and file access follows the
+// directory ACL, so a log directory under %PUBLIC% exposes logs to every
+// local account. Warn once per interval when the configured directory is there.
+const PUBLIC_WARN_INTERVAL_MS = 30_000;
+let lastPublicWarnAt = 0;
+function warnIfPubliclyReadable() {
+  const now = Date.now();
+  if (now - lastPublicWarnAt < PUBLIC_WARN_INTERVAL_MS) return;
+  lastPublicWarnAt = now;
+  try { process.stderr.write('[dsh-runtime-log] log directory is under a public location; local logs may be readable by other accounts. Configure a private directory.\n'); } catch {}
+}
+function isUnderPublicRoot(directory, env) {
+  try {
+    const publicRoot = env?.PUBLIC;
+    if (typeof publicRoot !== 'string' || !publicRoot.trim()) return false;
+    const root = path.resolve(expandHome(publicRoot, os.homedir())).toLowerCase();
+    const dir = path.resolve(directory).toLowerCase();
+    return dir === root || dir.startsWith(root + '\\') || dir.startsWith(root + '/');
+  } catch { return false; }
 }
 function expandHome(value, home) {
   if (typeof value !== 'string') return value;
@@ -116,6 +146,7 @@ function makeExporter(state, rootState) {
   } };
 }
 function makeState(directory, config, reg) {
+  if (isUnderPublicRoot(directory, process.env)) warnIfPubliclyReadable();
   const filePath = path.join(directory, 'host-' + process.pid + '-' + randomUUID() + '.jsonl');
   const sink = createLogSink({ filePath, ...config, onError: reportFailure });
   const state = { directory, filePath, sink, refs: 0, roots: new Map(), retention: null, drainTimeoutMs: config.drainTimeoutMs };
@@ -164,6 +195,9 @@ async function closeState(reg, state) {
   const closeDeadline = Date.now() + state.drainTimeoutMs;
   if (reg.sinks.get(state.directory) === state) reg.sinks.delete(state.directory);
   reg.closing.add(state);
+  // Bounded defense: an evicted timed-out run falls back to isRunActive's
+  // conservative answer (never positively closed, never pruned).
+  if (reg.closing.size > MAX_CLOSING_STATES) reg.closing.delete(reg.closing.values().next().value);
   let snapshot;
   try { snapshot = state.sink.stats(); } catch {}
   lifecycle(state, 'stop', snapshot);
@@ -213,7 +247,7 @@ function acquire(ctx, config) {
   try { if (ctx.root && (typeof ctx.root === 'object' || typeof ctx.root === 'function')) root = ctx.root; } catch {}
   let rootState = state.roots.get(root);
   if (!rootState) {
-    rootState = { refs: 0, seen: new Set(), order: [], exporter: makeExporter(state, null) };
+    rootState = { refs: 0, seen: new Set(), order: [], exporter: null };
     state.roots.set(root, rootState);
     rootState.exporter = makeExporter(state, rootState);
   }
