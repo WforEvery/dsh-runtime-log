@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.2 - 2026-11-20
+
 - 写入性能：drain 每周期将待写队列拼为单次批量写，替代逐条顺序 appendFile；在途记账改为条数与字节，行为与故障路径不变。
 - 脱敏增强：新增 URL userinfo（`scheme://user:pass@host`）、凭据关键词后引号值、停用词保护的关键词后空格裸值三类规则；README 同步更新覆盖范围与残余缺口。
 - Windows 权限：启动时检测日志目录位于 `%PUBLIC%` 之下并限频告警；README 说明 `0o600` 模式位在 Windows 上不生效、权限继承目录 ACL。
