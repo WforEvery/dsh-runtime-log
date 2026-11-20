@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- 新增 `pinOnFirstError`（默认开启）：首条 ERROR 到达时把已写内容封存为 `host-<pid>-<uuid>-incident.jsonl`，崩溃前的上下文不再被后续轮转覆盖；incident 文件计入 16 文件保留目标并随运行组回收，每运行最多封存一次。
+- 新增 `pinOnFirstError`（默认开启）：首条 ERROR 到达时把当前段（自上次轮转以来）封存为 `host-<pid>-<uuid>-incident.jsonl`，崩溃起点前的上下文不再被后续轮转覆盖；更早的已轮转段不在封存范围内。incident 文件计入 16 文件保留目标并随运行组回收，每运行最多封存一次。
+- 修复：积压时首条 ERROR 可能在被写入前从队列中被驱逐，导致封存永不发生；扫描顺序改为先判 ERROR 边界、后判容量。
+- 可观测性：新增 `pinFailures` 计数；启动/停止 marker 增加 `incidents`、`pinned`、`pinFailures`；关闭超时会触发一次受控 `onError`；封存成功即记录 incident 状态，重开失败不再造成统计与磁盘不一致。
+- 清理：移除未使用的 `DEFAULTS` 字段；incident 路径构造不再盲切 6 个字符；保留组内删除顺序明确为「轮转段 → incident → base」。
 ## 0.1.2 - 2026-11-20
 
 - 写入性能：drain 每周期将待写队列拼为单次批量写，替代逐条顺序 appendFile；在途记账改为条数与字节，行为与故障路径不变。

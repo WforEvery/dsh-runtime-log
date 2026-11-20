@@ -115,6 +115,7 @@ function parseRunFile(name) {
   return {
     pid,
     rotation: match[4] === undefined ? 0 : Number(match[4]),
+    incident: match[3] === '-incident',
     base: 'host-' + pid + '-' + runId + '.jsonl',
   }
 }
@@ -322,9 +323,14 @@ export async function pruneRuns(options = {}) {
       }
       if (status !== 'dead') continue
 
-      // Remove the oldest segments first and leave the base file for last, so
-      // an interrupted prune never discards the newest part of a run first.
-      const orderedFiles = group.files.slice().sort((left, right) => right.rotation - left.rotation)
+      // Remove the oldest rotated segments first, then the incident pin, and
+      // leave the base file for last, so an interrupted prune never discards
+      // the newest part of a run first.
+      const orderedFiles = group.files.slice().sort((left, right) => {
+        if (left.rotation !== right.rotation) return right.rotation - left.rotation
+        if (left.incident !== right.incident) return left.incident ? -1 : 1
+        return 0
+      })
       for (const file of orderedFiles) {
         if (isCurrentlyActive(group)) break
         try {

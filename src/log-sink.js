@@ -1,9 +1,11 @@
 /**
  * Bounded, best-effort JSONL sink; not crash-safe storage.
  * capture is synchronous; flush shares one never-rejecting writer promise and
- * appends the pending queue as one batched write per drain cycle; close stops
- * intake and drains to one deadline. An issued OS call cannot be
- * cancelled. After timeout only late settlement and handle cleanup are allowed.
+ * appends each batch with one fsp.appendFile call (rotation or pinning can
+ * split the queue into several batches per drain); close stops intake and
+ * drains to one deadline. An issued OS call cannot be cancelled. After timeout
+ * only late settlement and handle cleanup are allowed, though a late failure
+ * may still be reported through onError.
  *
  * Only primitive arguments and native Error own string data fields are logged.
  * Unsupported objects are [Object]; no object traversal, coercion or getters.
@@ -17,10 +19,11 @@
  * not complete scrubbing of arbitrary secrets.
  *
  * filePath is a unique run namespace, exclusively created and never resumed.
- * With pinOnFirstError the first ERROR record seals everything written so far
- * into a sibling <run>-incident.jsonl (one rename per sink, at most once) so
- * later rotations can never page the crash context out; the incident file
- * shares the run's retention group and is only removed with the whole run.
+ * With pinOnFirstError the first ERROR record seals the current segment (what
+ * was written since the last rotation) into a sibling <run>-incident.jsonl via
+ * one rename, attempted at most once per sink; later rotations only churn the
+ * regular .jsonl chain, so that segment survives. Segments rotated out earlier
+ * are outside the pin. The incident file shares the run's retention group.
  * A write/rotation failure disables this sink: a partial append may leave a
  * torn final line, but no later JSONL will be appended to it. Retention of other
  * runs belongs to the caller. fs/timers/now remain injectable for fault tests.
@@ -33,7 +36,6 @@ import { types } from 'node:util'
 
 const DEFAULTS = Object.freeze({
   maxFileBytes: 5 * 1024 * 1024,
-  maxRotations: 3,
   maxQueueRecords: 2000,
   maxQueueBytes: 1024 * 1024,
   flushIntervalMs: 200,
@@ -41,6 +43,7 @@ const DEFAULTS = Object.freeze({
   closeTimeoutMs: 2000,
   pinOnFirstError: true,
 })
+
 const DEFAULT_LEVELS = ['error', 'warn', 'info', 'debug']
 const MAX_ARGS = 20
 const MAX_SCAN = 64 * 1024
@@ -116,7 +119,7 @@ function createLimits(opts) {
     flushIntervalMs: positiveInt(opts.flushIntervalMs, DEFAULTS.flushIntervalMs, 0),
     maxEntryBytes: positiveInt(opts.maxEntryBytes, DEFAULTS.maxEntryBytes, 128),
     closeTimeoutMs: positiveInt(opts.closeTimeoutMs, positiveInt(opts.drainTimeoutMs, DEFAULTS.closeTimeoutMs, 1), 1),
-    pinOnFirstError: opts.pinOnFirstError !== false,
+    pinOnFirstError: (opts.pinOnFirstError ?? DEFAULTS.pinOnFirstError) !== false,
   }
 }
 function ownData(value, key) {
@@ -272,7 +275,7 @@ export function createLogSink(options = {}) {
   const filePath = typeof opts.filePath === 'string' ? nodePath.resolve(opts.filePath)
     : nodePath.join(typeof opts.dir === 'string' ? nodePath.resolve(opts.dir) : nodePath.join(nodeOs.tmpdir(), 'dsh-runtime-log'),
       typeof opts.fileName === 'string' ? nodePath.basename(opts.fileName) : 'runtime-' + process.pid + '-' + randomUUID() + '.jsonl')
-  const state = { accepted: 0, ignored: 0, dropped: 0, written: 0, errors: 0, rotations: 0, incidents: 0, bytesWritten: 0, lost: 0, lastError: null }
+  const state = { accepted: 0, ignored: 0, dropped: 0, written: 0, errors: 0, rotations: 0, incidents: 0, pinFailures: 0, bytesWritten: 0, lost: 0, lastError: null }
   let queue = []
   let queuedBytes = 0
   let inFlight = null
@@ -287,7 +290,9 @@ export function createLogSink(options = {}) {
   let closePromise = null
   let timer = null
   let incidentPath = null
-  let pinSettled = false
+  // Latched on the first pin attempt, successful or not: one attempt per sink,
+  // failures are counted in state.pinFailures and never retried.
+  let pinAttempted = false
   const done = Promise.resolve()
   const stopped = () => disabled || timedOut || closed
 
@@ -307,6 +312,14 @@ export function createLogSink(options = {}) {
     state.lastError = 'Runtime log I/O failed; sink disabled.'
     // No raw filesystem text, paths, credentials or arbitrary error hooks.
     if (onError && state.errors === 1) {
+      try { onError(new NativeError(state.lastError)) } catch { /* callback containment */ }
+    }
+  }
+  // A close timeout discards pending records; report it once, with the same
+  // containment rules as every other failure (no raw paths or fs text).
+  function noteTimeout() {
+    state.lastError = 'Runtime log close timed out; pending records were discarded.'
+    if (onError) {
       try { onError(new NativeError(state.lastError)) } catch { /* callback containment */ }
     }
   }
@@ -355,38 +368,92 @@ export function createLogSink(options = {}) {
     currentSize = 0
     state.rotations++
   }
-  // Seals everything written so far into <run>-incident.jsonl and starts a
-  // fresh segment, so the pre-crash context is never touched by rotation.
-  // Best-effort: if the rename fails we keep appending to the old segment.
+  // <filePath minus .jsonl> + '-incident.jsonl', never slicing blindly so a
+  // caller-supplied filePath without the extension stays intact.
+  function incidentPathFor(target) {
+    const base = target.endsWith('.jsonl') ? target.slice(0, -'.jsonl'.length) : target
+    return base + '-incident.jsonl'
+  }
+  // Seals the current segment into <run>-incident.jsonl and starts a fresh
+  // one, so the pre-crash context is never touched by rotation. Best-effort:
+  // if the rename fails we keep appending to the old segment. The incident
+  // path is recorded as soon as the rename succeeds, even if the reopen then
+  // fails, so stats always match the directory.
   async function sealSegment() {
-    const candidate = filePath.slice(0, filePath.length - '.jsonl'.length) + '-incident.jsonl'
+    const candidate = incidentPathFor(filePath)
     await releaseHandle()
     if (stopped()) return
     try {
       await fsp.rename(filePath, candidate)
     } catch {
+      state.pinFailures++
       if (stopped()) return
       handle = await fsp.open(filePath, 'a', 0o600)
       return
     }
+    incidentPath = candidate
+    state.incidents++
     if (stopped()) return
     handle = await fsp.open(filePath, 'wx', 0o600)
     currentSize = 0
-    incidentPath = candidate
-    state.incidents++
   }
   // Fallback for a first error that lands right after a rotation: the fresh
   // segment is empty, and the crash context is the just-rotated .1 segment.
   async function sealPreviousSegment() {
     const previous = filePath + '.1'
-    const candidate = filePath.slice(0, filePath.length - '.jsonl'.length) + '-incident.jsonl'
+    const candidate = incidentPathFor(filePath)
     try {
       await fsp.rename(previous, candidate)
-    } catch {
+    } catch (error) {
+      if (ownData(error, 'code') !== 'ENOENT') state.pinFailures++
       return
     }
     incidentPath = candidate
     state.incidents++
+  }
+  // Scans the queue from its head for the next batch: every record that fits
+  // into the current segment, stopping right before the first error record
+  // while a pin is still pending. The pin boundary is checked before the size
+  // limit on purpose: an error that does not fit yet must still stop the scan,
+  // otherwise it would sit at the queue head during the in-flight write below
+  // and could be evicted by capture() before the seal ever happens.
+  function buildBatch() {
+    const batch = []
+    let bytes = 0
+    let pinBoundary = false
+    for (const item of queue) {
+      if (limits.pinOnFirstError && !pinAttempted && item.error) {
+        pinBoundary = true
+        break
+      }
+      if (currentSize + bytes + item.data.length > limits.maxFileBytes) break
+      batch.push(item)
+      bytes += item.data.length
+    }
+    return { batch, bytes, pinBoundary }
+  }
+  // Appends one batch with a single fsp.appendFile call. inFlight keeps the
+  // records counted against queue capacity while the append is outstanding.
+  async function writeBatch(batch, bytes) {
+    if (bytes === 0) return
+    queue.splice(0, batch.length)
+    queuedBytes -= bytes
+    inFlight = {
+      records: batch.length,
+      bytes,
+      data: bytes === batch[0].data.length
+        ? batch[0].data
+        : Buffer.concat(batch.map(item => item.data), bytes),
+    }
+    try {
+      await fsp.appendFile(handle, inFlight.data)
+      currentSize += bytes
+      state.written += batch.length
+      state.bytesWritten += bytes
+    } catch (error) {
+      state.lost += batch.length
+      throw error
+    } finally { inFlight = null }
   }
   async function drain() {
     try {
@@ -399,44 +466,8 @@ export function createLogSink(options = {}) {
           await rotate()
           continue
         }
-        // One appendFile per drain cycle instead of one per record: every
-        // queued record that fits into the current segment shares a single
-        // write through the writeFile machinery. A pending pin stops the batch
-        // right before the first error record so the pre-error segment can be
-        // sealed intact. The batch is bounded by the queue byte cap, and
-        // inFlight keeps it counted against capacity while it is outstanding.
-        const batch = []
-        let batchBytes = 0
-        let pinBoundary = false
-        for (const item of queue) {
-          if (currentSize + batchBytes + item.data.length > limits.maxFileBytes) break
-          if (limits.pinOnFirstError && !pinSettled && item.error) {
-            pinBoundary = true
-            break
-          }
-          batch.push(item)
-          batchBytes += item.data.length
-        }
-        queue.splice(0, batch.length)
-        queuedBytes -= batchBytes
-        if (batchBytes > 0) {
-          inFlight = {
-            records: batch.length,
-            bytes: batchBytes,
-            data: batchBytes === batch[0].data.length
-              ? batch[0].data
-              : Buffer.concat(batch.map(item => item.data), batchBytes),
-          }
-          try {
-            await fsp.appendFile(handle, inFlight.data)
-            currentSize += batchBytes
-            state.written += batch.length
-            state.bytesWritten += batchBytes
-          } catch (error) {
-            state.lost += batch.length
-            throw error
-          } finally { inFlight = null }
-        }
+        const { batch, bytes, pinBoundary } = buildBatch()
+        await writeBatch(batch, bytes)
         if (pinBoundary) {
           // The first ERROR record is now next in the queue. Everything before
           // it is on disk; seal that segment once so rotation cannot drop the
@@ -444,7 +475,7 @@ export function createLogSink(options = {}) {
           // context sits in .1 and that segment is sealed instead.
           if (currentSize > 0) await sealSegment()
           else await sealPreviousSegment()
-          pinSettled = true
+          pinAttempted = true
           continue
         }
       }
@@ -512,6 +543,7 @@ export function createLogSink(options = {}) {
         settled = true
         if (timeout) {
           timedOut = true
+          noteTimeout()
           discardPending()
         }
         closed = true

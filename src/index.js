@@ -9,7 +9,7 @@ import { pruneRuns } from './retention.js';
 export const name = 'dsh-runtime-log';
 export const MAX_TOTAL_FILES = 16;
 export const DEFAULTS = Object.freeze({
-  directory: '', maxFileBytes: 5 * 1024 * 1024, maxFiles: 4,
+  maxFileBytes: 5 * 1024 * 1024, maxFiles: 4,
   maxQueueRecords: 2000, maxQueueBytes: 1024 * 1024,
   maxEntryBytes: 16 * 1024, flushIntervalMs: 200, drainTimeoutMs: 1000,
   pinOnFirstError: true,
@@ -157,17 +157,21 @@ function makeState(directory, config, reg) {
   // directory that did not exist at apply time become different registry keys
   // while still naming one real directory; a string comparison would let a
   // live aliased run be treated as dead and deleted.
+  // A tampered registry must not break acquire: entries without a string
+  // filePath are ignored rather than dereferenced.
   const activeFilePaths = [
-    ...Array.from(reg.sinks.values()).map(item => item.filePath),
-    ...Array.from(reg.closing).map(item => item.filePath),
-  ];
+    ...Array.from(reg.sinks.values()),
+    ...Array.from(reg.closing),
+  ].map(item => (item && typeof item.filePath === 'string' ? item.filePath : null))
+    .filter(Boolean);
   const isRunActive = (pid, base) => {
     if (pid !== process.pid) return false;
+    const matches = (item) => item && typeof item.filePath === 'string' && path.basename(item.filePath) === base;
     for (const item of reg.sinks.values()) {
-      if (path.basename(item.filePath) === base) return true;
+      if (matches(item)) return true;
     }
     for (const item of reg.closing) {
-      if (path.basename(item.filePath) === base) return true;
+      if (matches(item)) return true;
     }
     if (reg.closedRunBases.has(base)) return false;
     // This same PID may belong to a worker isolate whose registry is not visible
@@ -188,6 +192,7 @@ function lifecycle(state, phase, stats) {
   if (stats) {
     parts.push('accepted=' + stats.accepted, 'written=' + stats.written, 'dropped=' + stats.dropped,
       'lost=' + stats.lost, 'errors=' + stats.errors, 'rotations=' + stats.rotations,
+      'incidents=' + stats.incidents, 'pinned=' + stats.pinned, 'pinFailures=' + stats.pinFailures,
       'buffered=' + stats.buffered.records, 'inFlight=' + stats.inFlight.records,
       'disabled=' + stats.disabled, 'timedOut=' + stats.timedOut);
   }
