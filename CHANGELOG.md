@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.3 - 2026-11-20
+
 - 新增 `pinOnFirstError`（默认开启）：首条 ERROR 到达时把当前段（自上次轮转以来）封存为 `host-<pid>-<uuid>-incident.jsonl`，崩溃起点前的上下文不再被后续轮转覆盖；更早的已轮转段不在封存范围内。incident 文件计入 16 文件保留目标并随运行组回收，每运行最多封存一次。
 - 修复：积压时首条 ERROR 可能在被写入前从队列中被驱逐，导致封存永不发生；扫描顺序改为先判 ERROR 边界、后判容量。
 - 可观测性：新增 `pinFailures` 计数；启动/停止 marker 增加 `incidents`、`pinned`、`pinFailures`；关闭超时会触发一次受控 `onError`；封存成功即记录 incident 状态，重开失败不再造成统计与磁盘不一致。

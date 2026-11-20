@@ -4,7 +4,7 @@
 
 [GitHub Release](https://github.com/WforEvery/dsh-runtime-log/releases) · [npm](https://www.npmjs.com/package/dsh-runtime-log) · [变更记录](CHANGELOG.md) · [问题反馈](https://github.com/WforEvery/dsh-runtime-log/issues) · [MIT 许可证](LICENSE)
 
-> 当前修复版本为 **0.1.2**，已发布至 [npm](https://www.npmjs.com/package/dsh-runtime-log)。这是第三方 DSH 插件，不是 DeepSeek 官方产品。它只在下列支持环境中发布和验证；部署前请阅读隐私及限制说明。
+> 当前修复版本为 **0.1.3**，已发布至 [npm](https://www.npmjs.com/package/dsh-runtime-log)。这是第三方 DSH 插件，不是 DeepSeek 官方产品。它只在下列支持环境中发布和验证；部署前请阅读隐私及限制说明。
 
 ## 功能
 
@@ -17,11 +17,11 @@
 
 ## 兼容性
 
-以下为 **0.1.2 的支持声明**，并非对其它版本或平台的兼容承诺。
+以下为 **0.1.3 的支持声明**，并非对其它版本或平台的兼容承诺。
 
 | 组件 | 支持范围 | 已验证环境 |
 | --- | --- | --- |
-| DSH | **仅 `0.2.2-rc.1`** | 0.1.2 本地冒烟验收；0.1.1 隔离宿主验收；0.1.0 曾通过真实桌面完整重启 |
+| DSH | **仅 `0.2.2-rc.1`** | 0.1.3 / 0.1.2 本地冒烟验收；0.1.1 隔离宿主验收；0.1.0 曾通过真实桌面完整重启 |
 | Cordis | **`4.1.0`** | 由上述 DSH 版本提供 |
 | Node.js | **`>=24.16.0 <25`** | `24.16.0`、DSH 自带的 `24.21.0` |
 | 操作系统与架构 | **Windows x64** | Windows 桌面宿主 |
@@ -37,7 +37,7 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
 1. 在目标 profile 目录安装指定版本：
 
    ```powershell
-   pnpm add dsh-runtime-log@0.1.2 --ignore-scripts
+   pnpm add dsh-runtime-log@0.1.3 --ignore-scripts
    ```
 
 2. 在该 profile 的 `dsh.profile.bundles` 中添加 `dsh-runtime-log`，保留原有 bundle：
@@ -102,7 +102,7 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
 
 文件名为 `host-<pid>-<uuid>.jsonl`，轮转段使用 `.1`、`.2` 等后缀。默认每次运行最多保留 4 个常规段（封存生效时另有至多 1 个 incident 文件），每段最多 5 MiB。
 
-`pinOnFirstError` 开启时（默认），检测到第一条 ERROR 会把**当前段**（自上次轮转以来写入的内容）重命名为 `host-<pid>-<uuid>-incident.jsonl`，随后新段从这条 ERROR 开始写入。incident 文件不参与后续轮转删除——后续轮转只会覆盖常规段——因此「崩溃起点之前的那一段」会保留下来；更早、已经轮转出去的段不在封存范围内。该文件计入 16 文件保留目标，并随所在运行组在旧运行清理时一起回收；每运行最多封存一次，运行中再出现 ERROR 不会重复封存。定位崩溃起点时，请看 incident 文件的尾部，再到新段（常规 `.jsonl` 段）里找第一条 ERROR。该功能随下一个 npm 版本发布，当前 npm 上的 0.1.2 不包含首错封存。
+`pinOnFirstError` 开启时（默认），检测到第一条 ERROR 会把**当前段**（自上次轮转以来写入的内容）重命名为 `host-<pid>-<uuid>-incident.jsonl`，随后新段从这条 ERROR 开始写入。incident 文件不参与后续轮转删除——后续轮转只会覆盖常规段——因此「崩溃起点之前的那一段」会保留下来；更早、已经轮转出去的段不在封存范围内。该文件计入 16 文件保留目标，并随所在运行组在旧运行清理时一起回收；每运行最多封存一次，运行中再出现 ERROR 不会重复封存。定位崩溃起点时，请看 incident 文件的尾部，再到新段（常规 `.jsonl` 段）里找第一条 ERROR。
 
 每行是一条 UTF-8 JSON 记录：
 
