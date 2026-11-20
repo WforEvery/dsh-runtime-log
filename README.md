@@ -11,7 +11,7 @@
 - 通过 Cordis logger exporter 接收 WARN 和 ERROR，异步写入本地 JSONL 文件；INFO / DEBUG 不保存。
 - 限制队列记录数、队列字节数及单条编码大小，到达单段文件上限时轮转。
 - 按运行实例区分文件，并在启动时尝试清理可确认已关闭的旧运行日志。
-- 首错封存：检测到第一条 ERROR 时把当前段（自上次轮转以来）封存为独立 incident 文件，崩溃前的上下文不会被后续轮转冲掉。
+- 事件封存：可配置触发（首条 ERROR / 首条 WARN / 静默期后的新事件），把当前段（自上次轮转以来）封存为独立 incident 文件，崩溃前的上下文不会被后续轮转冲掉；正常关闭时归档到 `archive/` 目录。
 - 对常见凭据文本格式进行尽力脱敏；不遍历或序列化任意参数对象。
 - 只使用 Node.js 内置模块，无第三方运行时依赖；插件本身不发起网络请求或上传日志。
 
@@ -76,7 +76,11 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
 | `maxEntryBytes` | `16384`（16 KiB） | 单条记录编码上限，256 B–`min(256 KiB, maxQueueBytes)` |
 | `flushIntervalMs` | `200` | 批量写入周期，25–60000 ms |
 | `drainTimeoutMs` | `1000` | 卸载时等待排空的期限，25–10000 ms |
-| `pinOnFirstError` | `true` | 布尔；首条 ERROR 到达时封存当前段（见「日志与保留」），`false` 关闭 |
+| `pinOn` | `error` | 封存触发：`error`（首条 ERROR）、`warn`（首条 WARN 或 ERROR，建议配合 `pinQuietMs`）或 `off`；`pinOnFirstError: false` 作为旧别名等价于 `off` |
+| `pinQuietMs` | `0` | 0–600000；大于 0 时仅当距上一条日志至少间隔该毫秒数才触发封存，用于「空闲后的第一条 WARN 开启新事件」 |
+| `maxTotalFiles` | `16` | 2–256；启动清理时跨运行保留的日志文件总数目标 |
+| `archiveIncidents` | `true` | 正常关闭时把 incident 文件移入 `archive/` 子目录，避免随运行组被清理 |
+| `archiveMaxFiles` | `16` | 1–256；`archive/` 中最多保留的 incident 文件数（按修改时间保留最新） |
 
 数值配置要求安全整数；超出范围会被限制到允许边界，类型无效时使用默认值。单条记录的实际大小还受队列和文件上限约束。
 
@@ -93,7 +97,11 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
     maxEntryBytes: 16384
     flushIntervalMs: 200
     drainTimeoutMs: 1000
-    pinOnFirstError: true
+    pinOn: error
+    pinQuietMs: 0
+    maxTotalFiles: 16
+    archiveIncidents: true
+    archiveMaxFiles: 16
 ```
 
 路径仅为示例，目录必须允许 DSH 宿主写入。用户 patch 中的 `config` 整体替换较早层配置；未填写字段由插件补默认值。同一进程内，相同日志目录共享写入器，首次创建时的参数生效。建议同一目录只配置一套参数。
@@ -102,7 +110,9 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
 
 文件名为 `host-<pid>-<uuid>.jsonl`，轮转段使用 `.1`、`.2` 等后缀。默认每次运行最多保留 4 个常规段（封存生效时另有至多 1 个 incident 文件），每段最多 5 MiB。
 
-`pinOnFirstError` 开启时（默认），检测到第一条 ERROR 会把**当前段**（自上次轮转以来写入的内容）重命名为 `host-<pid>-<uuid>-incident.jsonl`，随后新段从这条 ERROR 开始写入。incident 文件不参与后续轮转删除——后续轮转只会覆盖常规段——因此「崩溃起点之前的那一段」会保留下来；更早、已经轮转出去的段不在封存范围内。该文件计入 16 文件保留目标，并随所在运行组在旧运行清理时一起回收；每运行最多封存一次，运行中再出现 ERROR 不会重复封存。定位崩溃起点时，请看 incident 文件的尾部，再到新段（常规 `.jsonl` 段）里找第一条 ERROR。
+封存由 `pinOn` 控制（默认 `error`）：检测到第一条符合条件的记录（ERROR；或 `pinOn: warn` 时的任意 WARN / ERROR）会把**当前段**（自上次轮转以来写入的内容）重命名为 `host-<pid>-<uuid>-incident.jsonl`，随后新段从该记录开始写入。`pinQuietMs` 大于 0 时，只有距上一条日志至少间隔该毫秒数的「新事件起点」才会触发封存（建议与 `pinOn: warn` 搭配使用）。incident 文件不参与后续轮转删除——后续轮转只会覆盖常规段——因此「事件起点之前的那一段」会保留下来；更早、已经轮转出去的段不在封存范围内。在「`pinOn: warn` + `pinQuietMs`」的事件模式下，无可封存内容时不会消耗封存机会，之后的事件仍可触发；`error` 模式保持「首条 ERROR 仅尝试一次」。定位崩溃起点时，请看 incident 文件的尾部，再到新段（常规 `.jsonl` 段）里找第一条记录。
+
+跨运行保留由 `maxTotalFiles`（默认 16）控制。`archiveIncidents` 开启时（默认），正常关闭会把 incident 文件移入 `archive/` 子目录，不受运行组回收影响；`archiveMaxFiles`（默认 16）按修改时间保留最新的若干个。强制结束进程不会触发归档，incident 留在日志目录并随运行组按原规则回收。
 
 每行是一条 UTF-8 JSON 记录：
 

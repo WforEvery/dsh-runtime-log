@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +13,9 @@ export const DEFAULTS = Object.freeze({
   maxFileBytes: 5 * 1024 * 1024, maxFiles: 4,
   maxQueueRecords: 2000, maxQueueBytes: 1024 * 1024,
   maxEntryBytes: 16 * 1024, flushIntervalMs: 200, drainTimeoutMs: 1000,
-  pinOnFirstError: true,
+  pinOn: 'error', pinQuietMs: 0,
+  maxTotalFiles: MAX_TOTAL_FILES,
+  archiveIncidents: true, archiveMaxFiles: 16,
 });
 // Shared across plugin copies so one process owns one sink per directory.
 // This is a deduplication registry, not a security boundary: Symbol.for is
@@ -84,6 +87,11 @@ function dataField(object, key) {
 function bounded(value, fallback, min, max) {
   return Number.isSafeInteger(value) ? Math.max(min, Math.min(max, value)) : fallback;
 }
+// pinOnFirstError=false is kept as a legacy alias for pinOn: 'off'.
+function resolvePinOn(value, legacy) {
+  if (value === 'error' || value === 'warn' || value === 'off') return value;
+  return legacy === false ? 'off' : DEFAULTS.pinOn;
+}
 function normalize(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) && !types.isProxy(raw) ? raw : null;
   const field = key => dataField(source, key);
@@ -99,7 +107,11 @@ function normalize(raw) {
     maxEntryBytes: bounded(field('maxEntryBytes'), Math.min(DEFAULTS.maxEntryBytes, queueBytes), 256, Math.min(256 * 1024, queueBytes)),
     flushIntervalMs: bounded(field('flushIntervalMs'), DEFAULTS.flushIntervalMs, 25, 60_000),
     drainTimeoutMs: bounded(field('drainTimeoutMs'), DEFAULTS.drainTimeoutMs, 25, 10_000),
-    pinOnFirstError: field('pinOnFirstError') !== false,
+    pinOn: resolvePinOn(field('pinOn'), field('pinOnFirstError')),
+    pinQuietMs: bounded(field('pinQuietMs'), DEFAULTS.pinQuietMs, 0, 600_000),
+    maxTotalFiles: bounded(field('maxTotalFiles'), DEFAULTS.maxTotalFiles, 2, 256),
+    archiveIncidents: field('archiveIncidents') !== false,
+    archiveMaxFiles: bounded(field('archiveMaxFiles'), DEFAULTS.archiveMaxFiles, 1, 256),
   };
 }
 function canonicalize(directory) {
@@ -151,7 +163,11 @@ function makeState(directory, config, reg) {
   if (isUnderPublicRoot(directory, process.env)) warnIfPubliclyReadable();
   const filePath = path.join(directory, 'host-' + process.pid + '-' + randomUUID() + '.jsonl');
   const sink = createLogSink({ filePath, ...config, onError: reportFailure });
-  const state = { directory, filePath, sink, refs: 0, roots: new Map(), retention: null, drainTimeoutMs: config.drainTimeoutMs };
+  const state = {
+    directory, filePath, sink, refs: 0, roots: new Map(), retention: null,
+    drainTimeoutMs: config.drainTimeoutMs,
+    archiveIncidents: config.archiveIncidents, archiveMaxFiles: config.archiveMaxFiles,
+  };
   // Run UUIDs are unique inside this process, so activity is matched by the run
   // basename instead of by directory string. Two case spellings of a Windows
   // directory that did not exist at apply time become different registry keys
@@ -182,7 +198,7 @@ function makeState(directory, config, reg) {
   // current run has not written its first segment, never all future rotations.
   state.retention = Promise.resolve().then(() => pruneRuns({
     directory, currentFilePath: filePath, activeFilePaths,
-    maxTotalFiles: MAX_TOTAL_FILES, reserveCurrentRun: true,
+    maxTotalFiles: config.maxTotalFiles, reserveCurrentRun: true,
     currentProcessPid: process.pid, pruneCurrentProcessRuns: true, isRunActive,
   })).catch(() => null);
   return state;
@@ -198,6 +214,35 @@ function lifecycle(state, phase, stats) {
   }
   state.sink.capture({ type: 'warn', name, args: [parts.join(' ')] });
 }
+// Moves a sealed incident into <directory>/archive so it survives the run
+// group's cleanup, then trims the archive to the newest maxFiles entries.
+// Best-effort: failures are reported once and never block close.
+async function archiveIncident(directory, incidentFile, maxFiles) {
+  if (typeof incidentFile !== 'string' || incidentFile.length === 0) return;
+  const archiveDir = path.join(directory, 'archive');
+  await fsPromises.mkdir(archiveDir, { recursive: true });
+  const target = path.join(archiveDir, path.basename(incidentFile));
+  try {
+    await fsPromises.rename(incidentFile, target);
+  } catch {
+    await fsPromises.copyFile(incidentFile, target);
+    try { await fsPromises.unlink(incidentFile); } catch {}
+  }
+  const names = await fsPromises.readdir(archiveDir);
+  const entries = [];
+  for (const name of names) {
+    if (!name.endsWith('-incident.jsonl')) continue;
+    try {
+      const stats = await fsPromises.stat(path.join(archiveDir, name));
+      entries.push({ name, mtimeMs: Number(stats.mtimeMs) || 0 });
+    } catch {}
+  }
+  entries.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  for (const extra of entries.slice(maxFiles)) {
+    try { await fsPromises.unlink(path.join(archiveDir, extra.name)); } catch {}
+  }
+}
+
 async function closeState(reg, state) {
   const closeDeadline = Date.now() + state.drainTimeoutMs;
   if (reg.sinks.get(state.directory) === state) reg.sinks.delete(state.directory);
@@ -214,6 +259,11 @@ async function closeState(reg, state) {
     const finalStats = state.sink.stats();
     definitelySettled = finalStats.timedOut !== true && finalStats.inFlight?.records === 0;
   } catch { reportFailure(); }
+  if (state.archiveIncidents) {
+    let incidentFile = null;
+    try { incidentFile = state.sink.stats().incidentFile; } catch {}
+    try { await archiveIncident(state.directory, incidentFile, state.archiveMaxFiles); } catch { reportFailure(); }
+  }
   // Retention may block on a slow or unavailable filesystem. Do not let that
   // background scan extend the Cordis disposer beyond the sink's close deadline.
   // Keep the run in `closing` until the scan settles, then record that this

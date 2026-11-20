@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 封存触发可配置：`pinOn`（`error` / `warn` / `off`）与 `pinQuietMs`（静默期，配合 `warn` 用于「空闲后的新事件」）；`pinOnFirstError: false` 保留为 `off` 的旧别名。事件模式下无可封存内容时不消耗封存机会，之后的事件仍可触发；`error` 模式行为不变。
+- 新增 `maxTotalFiles`（默认 16，2–256）：启动清理的跨运行文件目标不再写死。
+- 新增 `archiveIncidents`（默认开启）与 `archiveMaxFiles`（默认 16）：正常关闭时把 incident 文件归档到 `archive/` 子目录，避免随运行组被清理。
+
 - 支持声明：`engines.dsh` 由精确锁定 `0.2.2-rc.1` 改为范围 `>=0.2.2-rc.1`。宿主以 semver 范围校验并启用预发布比较（`includePrerelease`），因此更新的正式版与未发布的预发布版默认按兼容放行；低于 `0.2.2-rc.1` 的 DSH 仍不支持。
 
 ## 0.1.3 - 2026-11-20

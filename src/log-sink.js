@@ -19,11 +19,13 @@
  * not complete scrubbing of arbitrary secrets.
  *
  * filePath is a unique run namespace, exclusively created and never resumed.
- * With pinOnFirstError the first ERROR record seals the current segment (what
- * was written since the last rotation) into a sibling <run>-incident.jsonl via
- * one rename, attempted at most once per sink; later rotations only churn the
- * regular .jsonl chain, so that segment survives. Segments rotated out earlier
- * are outside the pin. The incident file shares the run's retention group.
+ * With pinOn ('error' default, 'warn' or 'off') the first qualifying record
+ * seals the current segment (what was written since the last rotation) into a
+ * sibling <run>-incident.jsonl via one rename; pinQuietMs optionally requires
+ * a quiet gap before a record counts as an episode start. Later rotations only
+ * churn the regular .jsonl chain, so the sealed segment survives. Segments
+ * rotated out earlier are outside the pin. The incident file shares the run's
+ * retention group.
  * A write/rotation failure disables this sink: a partial append may leave a
  * torn final line, but no later JSONL will be appended to it. Retention of other
  * runs belongs to the caller. fs/timers/now remain injectable for fault tests.
@@ -41,7 +43,8 @@ const DEFAULTS = Object.freeze({
   flushIntervalMs: 200,
   maxEntryBytes: 16 * 1024,
   closeTimeoutMs: 2000,
-  pinOnFirstError: true,
+  pinOn: 'error',
+  pinQuietMs: 0,
 })
 
 const DEFAULT_LEVELS = ['error', 'warn', 'info', 'debug']
@@ -109,6 +112,21 @@ const TEXT_RULES = [
 function positiveInt(value, fallback, minimum) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum ? value : fallback
 }
+// 'error' pins on the first ERROR, 'warn' also accepts WARN records, 'off'
+// disables pinning. pinOnFirstError=false stays supported as a legacy alias
+// for 'off'.
+function resolvePinMode(opts) {
+  if (opts.pinOn === 'error' || opts.pinOn === 'warn' || opts.pinOn === 'off') return opts.pinOn
+  if (opts.pinOnFirstError === false) return 'off'
+  return DEFAULTS.pinOn
+}
+function nowMs(now) {
+  try {
+    const value = now()
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+  } catch { /* trusted injected clock may fail */ }
+  return Date.now()
+}
 function createLimits(opts) {
   const rotations = positiveInt(opts.maxFiles, 4, 1) - 1
   return {
@@ -119,7 +137,8 @@ function createLimits(opts) {
     flushIntervalMs: positiveInt(opts.flushIntervalMs, DEFAULTS.flushIntervalMs, 0),
     maxEntryBytes: positiveInt(opts.maxEntryBytes, DEFAULTS.maxEntryBytes, 128),
     closeTimeoutMs: positiveInt(opts.closeTimeoutMs, positiveInt(opts.drainTimeoutMs, DEFAULTS.closeTimeoutMs, 1), 1),
-    pinOnFirstError: (opts.pinOnFirstError ?? DEFAULTS.pinOnFirstError) !== false,
+    pinOn: resolvePinMode(opts),
+    pinQuietMs: Math.min(positiveInt(opts.pinQuietMs, DEFAULTS.pinQuietMs, 0), 600_000),
   }
 }
 function ownData(value, key) {
@@ -290,9 +309,11 @@ export function createLogSink(options = {}) {
   let closePromise = null
   let timer = null
   let incidentPath = null
-  // Latched on the first pin attempt, successful or not: one attempt per sink,
-  // failures are counted in state.pinFailures and never retried.
+  // Latched once a pin sealed (or attempted to seal) existing content; an
+  // empty boundary with nothing to protect is skipped and may retry later.
+  // Failures are counted in state.pinFailures and never retried.
   let pinAttempted = false
+  let lastAcceptedAt = null
   const done = Promise.resolve()
   const stopped = () => disabled || timedOut || closed
 
@@ -406,23 +427,26 @@ export function createLogSink(options = {}) {
       await fsp.rename(previous, candidate)
     } catch (error) {
       if (ownData(error, 'code') !== 'ENOENT') state.pinFailures++
-      return
+      return false
     }
     incidentPath = candidate
     state.incidents++
+    return true
   }
   // Scans the queue from its head for the next batch: every record that fits
-  // into the current segment, stopping right before the first error record
-  // while a pin is still pending. The pin boundary is checked before the size
-  // limit on purpose: an error that does not fit yet must still stop the scan,
-  // otherwise it would sit at the queue head during the in-flight write below
-  // and could be evicted by capture() before the seal ever happens.
+  // into the current segment, stopping right before the first qualifying
+  // record (ERROR, or any record in 'warn' mode, optionally after a quiet
+  // gap) while a pin is still pending. The pin boundary is checked before the
+  // size limit on purpose: a record that does not fit yet must still stop the
+  // scan, otherwise it would sit at the queue head during the in-flight write
+  // below and could be evicted by capture() before the seal ever happens.
   function buildBatch() {
     const batch = []
     let bytes = 0
     let pinBoundary = false
     for (const item of queue) {
-      if (limits.pinOnFirstError && !pinAttempted && item.error) {
+      const qualifies = limits.pinOn === 'warn' ? true : item.error
+      if (limits.pinOn !== 'off' && !pinAttempted && !item.pinSkipped && qualifies && item.quiet) {
         pinBoundary = true
         break
       }
@@ -469,13 +493,24 @@ export function createLogSink(options = {}) {
         const { batch, bytes, pinBoundary } = buildBatch()
         await writeBatch(batch, bytes)
         if (pinBoundary) {
-          // The first ERROR record is now next in the queue. Everything before
-          // it is on disk; seal that segment once so rotation cannot drop the
+          // The boundary record is now next in the queue. Everything before it
+          // is on disk; seal that segment once so rotation cannot drop the
           // crash context later. If the segment was just rotated empty, the
-          // context sits in .1 and that segment is sealed instead.
-          if (currentSize > 0) await sealSegment()
-          else await sealPreviousSegment()
-          pinAttempted = true
+          // context sits in .1 and that segment is sealed instead. When there
+          // is nothing to protect yet, skip this record as a boundary so it is
+          // written normally and a later qualifying record can still pin.
+          if (currentSize > 0) {
+            await sealSegment()
+            pinAttempted = true
+          } else if (await sealPreviousSegment()) {
+            pinAttempted = true
+          } else if (limits.pinOn === 'warn' && limits.pinQuietMs > 0 && queue[0]) {
+            // Episode mode: this boundary had nothing to protect yet. Skip
+            // that record as a boundary and let a later episode start retry.
+            queue[0].pinSkipped = true
+          } else {
+            pinAttempted = true
+          }
           continue
         }
       }
@@ -518,7 +553,12 @@ export function createLogSink(options = {}) {
         state.dropped++
         return false
       }
-      queue.push({ data, error: level === 'error' })
+      const at = nowMs(now)
+      // Whether this record starts an episode: the gap since the previous
+      // accepted record is at least pinQuietMs (true for the first record).
+      const quiet = lastAcceptedAt === null || at - lastAcceptedAt >= limits.pinQuietMs
+      lastAcceptedAt = at
+      queue.push({ data, error: level === 'error', quiet })
       queuedBytes += data.length
       state.accepted++
       return true
@@ -569,6 +609,7 @@ export function createLogSink(options = {}) {
       buffered: { records: queue.length + flight.records, bytes: queuedBytes + flight.bytes },
       limits: { ...limits },
       pinned: incidentPath !== null,
+      incidentFile: incidentPath,
       accepting: accepting && !stopped(), closed, disabled, timedOut,
     }
   }
