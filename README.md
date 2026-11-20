@@ -21,14 +21,14 @@
 
 | 组件 | 支持范围 | 已验证环境 |
 | --- | --- | --- |
-| DSH | **仅 `0.2.2-rc.1`** | 0.1.3 / 0.1.2 本地冒烟验收；0.1.1 隔离宿主验收；0.1.0 曾通过真实桌面完整重启 |
-| Cordis | **`4.1.0`** | 由上述 DSH 版本提供 |
+| DSH | **`>=0.2.2-rc.1`**（含更新版本与未发布的预发布版本） | 0.1.3 / 0.1.2 本地冒烟验收；0.1.1 隔离宿主验收；0.1.0 曾通过真实桌面完整重启；更新版本按兼容默认支持，未逐一验证 |
+| Cordis | **`4.1.0`**（由 DSH 提供，随宿主版本变化） | 由上述 DSH 版本提供 |
 | Node.js | **`>=24.16.0 <25`** | `24.16.0`、DSH 自带的 `24.21.0` |
 | 操作系统与架构 | **Windows x64** | Windows 桌面宿主 |
 
-Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐一测试。其它 DSH / Cordis 版本、Node.js 20–23 或 25+、macOS、Linux 和 Windows ARM64 均不在支持范围内。
+Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐一测试。DSH 低于 `0.2.2-rc.1` 的版本不在支持范围内；`0.2.2-rc.1` 及更新的版本（包括尚未发布的预发布版本）默认按兼容支持：宿主以 semver 范围校验 `engines.dsh`，并对预发布版本启用比较（`includePrerelease`），因此 `>=0.2.2-rc.1` 会放行后续所有正式版与预发布版。Node.js 20–23 或 25+、macOS、Linux 和 Windows ARM64 均不在支持范围内。
 
-宿主门禁信息位于 [package.json](package.json)：`engines.node`、`engines.dsh`、`dsh.bundle.platforms`、`os` 与 `cpu`。 [cordis.patch.yml](cordis.patch.yml) 只负责将插件 bundle 插入 profile，不承载版本门禁。升级 DSH 前应重新核对兼容性。
+宿主门禁信息位于 [package.json](package.json)：`engines.node`、`engines.dsh`、`dsh.bundle.platforms`、`os` 与 `cpu`。 [cordis.patch.yml](cordis.patch.yml) 只负责将插件 bundle 插入 profile，不承载版本门禁。更新版本的 DSH 未逐一验证；升级后若出现行为异常，请携带宿主版本反馈。
 
 ## 安装
 
