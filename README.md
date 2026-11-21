@@ -4,7 +4,7 @@
 
 [GitHub Release](https://github.com/WforEvery/dsh-runtime-log/releases) · [npm](https://www.npmjs.com/package/dsh-runtime-log) · [变更记录](CHANGELOG.md) · [问题反馈](https://github.com/WforEvery/dsh-runtime-log/issues) · [MIT 许可证](LICENSE)
 
-> 当前修复版本为 **0.1.3**，已发布至 [npm](https://www.npmjs.com/package/dsh-runtime-log)。这是第三方 DSH 插件，不是 DeepSeek 官方产品。它只在下列支持环境中发布和验证；部署前请阅读隐私及限制说明。
+> 当前修复版本为 **0.1.4**，已发布至 [npm](https://www.npmjs.com/package/dsh-runtime-log)。这是第三方 DSH 插件，不是 DeepSeek 官方产品。它只在下列支持环境中发布和验证；部署前请阅读隐私及限制说明。
 
 ## 功能
 
@@ -17,11 +17,11 @@
 
 ## 兼容性
 
-以下为 **0.1.3 的支持声明**，并非对其它版本或平台的兼容承诺。
+以下为 **0.1.4 的支持声明**，并非对其它版本或平台的兼容承诺。
 
 | 组件 | 支持范围 | 已验证环境 |
 | --- | --- | --- |
-| DSH | **`>=0.2.2-rc.1`**（含更新版本与未发布的预发布版本） | 0.1.3 / 0.1.2 本地冒烟验收；0.1.1 隔离宿主验收；0.1.0 曾通过真实桌面完整重启；更新版本按兼容默认支持，未逐一验证 |
+| DSH | **`>=0.2.2-rc.1`**（含更新版本与未发布的预发布版本） | 0.1.4 / 0.1.3 / 0.1.2 本地冒烟验收；0.1.1 隔离宿主验收；0.1.0 曾通过真实桌面完整重启；更新版本按兼容默认支持，未逐一验证 |
 | Cordis | **`4.1.0`**（由 DSH 提供，随宿主版本变化） | 由上述 DSH 版本提供 |
 | Node.js | **`>=24.16.0 <25`** | `24.16.0`、DSH 自带的 `24.21.0` |
 | 操作系统与架构 | **Windows x64** | Windows 桌面宿主 |
@@ -37,7 +37,7 @@ Node.js 区间对应 Node 24 发行线，区间内并非每个补丁版本都逐
 1. 在目标 profile 目录安装指定版本：
 
    ```powershell
-   pnpm add dsh-runtime-log@0.1.3 --ignore-scripts
+   pnpm add dsh-runtime-log@0.1.4 --ignore-scripts
    ```
 
 2. 在该 profile 的 `dsh.profile.bundles` 中添加 `dsh-runtime-log`，保留原有 bundle：
